@@ -1,7 +1,7 @@
 {
   "worker_name": "feifan-data-platform",
   "database_name": "feifan-web-db",
-  "database_id": "请替换成D1数据库的完整UUID",
+  "database_id": "1b5b3bc7-e494-426a-864d-7fb8cf31b108",
   "bucket_name": "feifan-web-files",
   "queue_name": "feifan-web-sync"
 }
