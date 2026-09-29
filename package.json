@@ -1,0 +1,30 @@
+{
+  "name": "feifan-data-platform-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "tsc --noEmit && node scripts/guide.mjs && node scripts/configure.mjs",
+    "deploy": "node scripts/configure.mjs --production && wrangler deploy --config wrangler.generated.jsonc --keep-vars",
+    "bundle": "npm run build && wrangler deploy --config wrangler.generated.jsonc --dry-run --outdir .bundle",
+    "test": "npm run bundle && tsx --test tests/*.test.ts",
+    "check-upload": "node scripts/check-upload.mjs"
+  },
+  "dependencies": {
+    "jose": "^6.2.12",
+    "papaparse": "^5.7.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260928.1",
+    "@types/node": "^26.6.3",
+    "@types/papaparse": "^5.5.2",
+    "miniflare": "^5.20260926.0-alpha",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.143.0"
+  }
+}
