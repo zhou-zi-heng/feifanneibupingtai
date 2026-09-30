@@ -8,7 +8,9 @@ const REPORTING='https://youtubereporting.googleapis.com/v1/';
 export class GoogleError extends AppError {constructor(status:number,message:string,public retryable=false){super(status,message,'google_error');}}
 export async function http(url:string,init:RequestInit={}){
   let response:Response;
-  try{response=await fetch(url,{...init,redirect:'error',signal:AbortSignal.timeout(25000)});}catch{throw new GoogleError(502,'暂时无法连接 Google，任务可重试。',true);}
+  // Workers supports manual/follow only. Never forward OAuth credentials across redirects.
+  try{response=await fetch(url,{...init,redirect:'manual',signal:AbortSignal.timeout(25000)});}catch{throw new GoogleError(502,'暂时无法连接 Google，任务可重试。',true);}
+  if(response.status>=300&&response.status<400)throw new GoogleError(502,'Google 接口返回了意外重定向，已停止请求以保护授权凭据。',false);
   if(!response.ok){
     let reason='';try{const body:any=await response.json();reason=typeof body.error==='string'?body.error:body.error?.errors?.[0]?.reason||body.error?.status||'';}catch{}
     reason=/^[\w-]{1,70}$/.test(reason)?reason:'';
