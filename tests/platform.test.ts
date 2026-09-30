@@ -8,6 +8,7 @@ import {studio,reachCsv,verifiedRatio,normalize,canReport,csvExport} from '../sr
 import {consume,startTask} from '../src/jobs';
 import {begin,finish,BASE_SCOPES} from '../src/google';
 import {digest} from '../src/types';
+import {pacificDay,lifetimePeriod} from '../src/library';
 import {generateKeyPair,exportJWK,SignJWT} from 'jose';
 
 const CID='UC'+'A'.repeat(22),OTHER='UC'+'B'.repeat(22),VID='demo0000001';
@@ -29,6 +30,12 @@ before(async()=>{
   db=await mf.getD1Database('DB');bucket=await mf.getR2Bucket('FILES');
 });
 after(async()=>{await mf?.dispose();});
+
+test('publication dates use Pacific calendar boundaries including DST',()=>{
+  assert.equal(pacificDay('2026-09-05T01:00:00Z'),'2026-09-04');
+  assert.equal(pacificDay('2026-01-05T07:00:00Z'),'2026-01-04');
+  assert.throws(()=>pacificDay('unknown'));
+});
 
 test('unconfigured D1 can be initialized by the designated owner only; repeat is safe',async()=>{
   assert.equal((await data('/api/me')).initialized,false);
@@ -182,10 +189,25 @@ test('catalog pagination, thumbnails and analytics survive duplicate work and pe
     const work=await db.prepare("SELECT id FROM ff_work WHERE task_id=? AND kind='catalog' LIMIT 1").bind(catalog).first();await deliver(work.id);assert.equal(playlistPages,2);
     const listing=await data('/api/videos?channel='+cid+'&page=2');assert.equal(listing.total,52);assert.equal(listing.items.length,24);
     const search=await data('/api/videos?channel='+cid+'&q=test0000051');assert.equal(search.items.length,1);
-    const task=await startTask(env,cid,'reports',OWNER,'2026-09-01','2026-09-26',{reports:['retention'],video_ids:[first]});await drain(task);assert.equal(apiReports,1);
-    const detail=await data(`/api/videos/${cid}/${first}?start=2026-09-01&end=2026-09-26`);assert.ok(Math.abs(detail.reports[0].data.dataset.points[0].retention_pct-110)<1e-9);
+    await db.prepare('UPDATE ff_videos SET published_at=? WHERE channel_id=? AND id=?').bind('2026-09-05T01:00:00Z',cid,first).run();
+    const lifetime=await lifetimePeriod(env,cid,first,'2026-09-26');assert.equal(lifetime.start,'2026-09-04');
+    const task=await startTask(env,cid,'reports',OWNER,'2026-08-31','2026-09-26',{period:'lifetime',reports:['retention'],video_ids:[first]});await drain(task);assert.equal(apiReports,1);
+    const detail=await data(`/api/videos/${cid}/${first}?start=2026-09-04&end=2026-09-26`);assert.ok(Math.abs(detail.reports[0].data.dataset.points[0].retention_pct-110)<1e-9);
     assert.equal((await db.prepare('SELECT status FROM ff_tasks WHERE id=?').bind(task).first()).status,'success');
-    const raw=await data('/api/reports/'+detail.reports[0].id+'/raw');assert.ok(raw.query.filters.includes(first));
+    const raw=await data('/api/reports/'+detail.reports[0].id+'/raw');assert.ok(raw.query.filters.includes(first));assert.equal(raw.query.startDate,'2026-09-04');
+    const trashBody={action:'delete',channel_id:cid,video_ids:[first],confirm:true};
+    assert.equal((await request('/api/trash',trashBody,STAFF)).status,403);
+    assert.equal((await request('/api/trash',{...trashBody,confirm:false})).status,400);
+    await data('/api/trash',trashBody);
+    assert.equal((await data('/api/videos?channel='+cid)).total,51);
+    assert.equal((await request(`/api/videos/${cid}/${first}`)).status,404);
+    assert.equal((await request(`/api/thumbnails/${cid}/${first}`)).status,404);
+    assert.equal((await request('/api/reports/'+detail.reports[0].id+'/raw')).status,404);
+    const exported=await (await request(`/api/channels/${cid}/export`)).text();assert.equal(exported.includes(first),false);
+    const skipped=await startTask(env,cid,'reports',OWNER,'2026-09-01','2026-09-26',{reports:['retention'],video_ids:[first]});await drain(skipped);assert.equal(apiReports,1);
+    await data('/api/trash',{...trashBody,action:'restore'});
+    assert.equal((await data('/api/videos?channel='+cid)).total,52);
+    assert.equal((await data(`/api/videos/${cid}/${first}`)).reports.length,1);
     const invalid=await request(`/api/channels/${cid}/tasks`,{kind:'reports',reports:['toString'],start:'2026-09-01',end:'2026-09-26'});assert.equal(invalid.status,403);
   }finally{globalThis.fetch=original;}
 });

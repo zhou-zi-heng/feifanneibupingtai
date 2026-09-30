@@ -1,3 +1,4 @@
+import {ensureLibrary,lifetimePeriod} from './library';
 import {Env,Row,AppError,all,one,run,batches,parse,now,digest} from './types';
 import {google,reportingList,download,GoogleError,MONEY} from './google';
 import {REPORTS,normalize,duration,reachCsv,verifiedRatio} from './reports';
@@ -72,6 +73,7 @@ async function imageBytes(response:Response){const chunks:Uint8Array[]=[];let co
 async function thumbnails(env:Env,task:Row,p:Row){
   let failures=0;
   for(const id of p.ids){
+    if(await one(env.DB,'SELECT 1 FROM ff_video_trash WHERE channel_id=? AND video_id=?',task.channel_id,id))continue;
     const video=await one(env.DB,'SELECT thumbnail_url FROM ff_videos WHERE channel_id=? AND id=?',task.channel_id,id);if(!video?.thumbnail_url)continue;
     try{
       const u=new URL(video.thumbnail_url);if(u.protocol!=='https:'||!['i.ytimg.com','img.youtube.com'].includes(u.hostname)||u.username||u.password||u.port)throw new Error('invalid thumbnail');
@@ -84,16 +86,19 @@ async function thumbnails(env:Env,task:Row,p:Row){
   if(failures)throw new GoogleError(502,`${failures} 张缩略图保存失败，可单独重试此步骤。`,true);
 }
 async function plan(env:Env,task:Row,p:Row){
+  await ensureLibrary(env);
   const options=parse(task.options_json);const types:string[]=options.reports;
   if(!p.cursor){for(const kind of types.filter(k=>!k.startsWith('retention')))await addWork(env,task.id,'analytics',{kind,vid:''},'channel:'+kind);}
   let videos:Row[]=[];let next:any=null;
   if(Array.isArray(options.video_ids)&&options.video_ids.length){const offset=Number(p.cursor||0);const ids=options.video_ids.slice(offset,offset+5);videos=ids.map((id:string)=>({id}));if(offset+5<options.video_ids.length)next=offset+5;}
-  else{videos=await all(env.DB,'SELECT id FROM ff_videos WHERE channel_id=? AND id>? ORDER BY id LIMIT 5',task.channel_id,String(p.cursor||''));if(videos.length===5)next=videos.at(-1)!.id;}
+  else{videos=await all(env.DB,'SELECT id FROM ff_visible_videos WHERE channel_id=? AND id>? ORDER BY id LIMIT 5',task.channel_id,String(p.cursor||''));if(videos.length===5)next=videos.at(-1)!.id;}
   for(const v of videos)for(const kind of types)await addWork(env,task.id,'analytics',{kind,vid:v.id},v.id+':'+kind);
   if(next!==null)await addWork(env,task.id,'plan',{cursor:next},'plan:'+next);
   await run(env.DB,'UPDATE ff_tasks SET note=?,updated_at=? WHERE id=?','正在按视频分批采集；每份报表独立保存。',now(),task.id);
 }
 async function analytics(env:Env,task:Row,work:Row,p:Row){
+  if(p.vid&&await one(env.DB,'SELECT 1 FROM ff_video_trash WHERE channel_id=? AND video_id=?',task.channel_id,p.vid))return 'cancelled';
+  if(p.vid&&parse(task.options_json).period==='lifetime'){const period=await lifetimePeriod(env,task.channel_id,p.vid,task.end_date);task={...task,start_date:period.start,end_date:period.end};}
   if(!Object.hasOwn(REPORTS,p.kind))throw new AppError(400,'不支持的报表。');const def=REPORTS[p.kind];
   if(def.money){const channel=await one(env.DB,'SELECT scopes_json FROM ff_channels WHERE id=?',task.channel_id);if(!parse<string[]>(channel?.scopes_json,[]).includes(MONEY)){await saveReport(env,task,work,p.kind,p.vid,'permission',{},'缺少收入只读授权，请管理员重新连接并勾选收入权限。');return 'permission';}}
   const filters=[p.vid?`video==${p.vid}`:'',def.filters||''].filter(Boolean).join(';');
@@ -140,6 +145,7 @@ async function reachFile(env:Env,task:Row,p:Row){
   return 'success';
 }
 export async function consume(env:Env,batch:MessageBatch<{id:string}>){
+  await ensureLibrary(env);
   for(const message of batch.messages){
     const work=await one(env.DB,'SELECT * FROM ff_work WHERE id=?',message.body.id);if(!work||!['pending','queued','running'].includes(work.status)){message.ack();continue;}
     const task=await one(env.DB,'SELECT * FROM ff_tasks WHERE id=?',work.task_id);if(!task||task.status==='cancelled'){message.ack();continue;}

@@ -1,3 +1,4 @@
+import {ensureLibrary,lifetimePeriod} from './library';
 import schema from './schema.sql';
 import {Env,Person,Row,AppError,all,one,run,batches,parse,now,allowed,admin,capability,isAdmin,dates,textValue,videoId,channelId} from './types';
 import {person,mutation,readJson,audit,local,configMissing} from './security';
@@ -12,9 +13,9 @@ const securityHeaders={
 };
 function json(data:any,status=200){return new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json;charset=utf-8',...securityHeaders}});}
 function file(data:BodyInit|null,type:string,name?:string){return new Response(data,{headers:{'Content-Type':type,...securityHeaders,...(name?{'Content-Disposition':`attachment; filename="${name}"`}:{})}});}
-async function initialized(env:Env){try{return (await one(env.DB,"SELECT value FROM ff_meta WHERE key='schema_version'"))?.value==='1';}catch{return false;}}
+async function initialized(env:Env){try{const ready=(await one(env.DB,"SELECT value FROM ff_meta WHERE key='schema_version'"))?.value==='1';if(ready)await ensureLibrary(env);return ready;}catch{return false;}}
 async function channels(env:Env,p:Person){
-  const items=await all(env.DB,`SELECT id,title,auth_state,connected_at,synced_at,scopes_json,ctr_unit,ctr_unit_source,last_error,(SELECT count(*) FROM ff_videos v WHERE v.channel_id=c.id) video_count,(SELECT count(*) FROM ff_videos v WHERE v.channel_id=c.id AND thumbnail_status='saved') thumbnail_count,(SELECT count(DISTINCT video_id) FROM ff_reports r WHERE r.channel_id=c.id AND r.kind='retention' AND r.status='success') retention_count FROM ff_channels c ORDER BY title`);
+  const items=await all(env.DB,`SELECT id,title,auth_state,connected_at,synced_at,scopes_json,ctr_unit,ctr_unit_source,last_error,(SELECT count(*) FROM ff_visible_videos v WHERE v.channel_id=c.id) video_count,(SELECT count(*) FROM ff_visible_videos v WHERE v.channel_id=c.id AND thumbnail_status='saved') thumbnail_count,(SELECT count(DISTINCT video_id) FROM ff_visible_reports r WHERE r.channel_id=c.id AND r.kind='retention' AND r.status='success') retention_count FROM ff_channels c ORDER BY title`);
   return items.filter(c=>isAdmin(p)||p.channels.includes(c.id)).map(c=>({id:c.id,title:c.title,auth_state:c.auth_state,connected_at:c.connected_at,synced_at:c.synced_at,video_count:c.video_count,thumbnail_count:c.thumbnail_count,retention_count:c.retention_count,...(isAdmin(p)?{monetary:parse<string[]>(c.scopes_json,[]).includes(MONEY),ctr_unit:c.ctr_unit,ctr_unit_source:c.ctr_unit_source,last_error:c.last_error}:{})}));
 }
 function exposeReport(r:Row,p:Person){
@@ -23,13 +24,13 @@ function exposeReport(r:Row,p:Person){
 }
 async function reportRows(env:Env,p:Person,cid:string,vid:string,start?:string,end?:string){
   allowed(p,cid);
-  const rows=await all(env.DB,`SELECT * FROM ff_reports WHERE channel_id=? AND video_id=? ${start&&end?'AND start_date=? AND end_date=?':''} ORDER BY updated_at DESC LIMIT 500`,cid,vid,...(start&&end?[start,end]:[]));
+  const rows=await all(env.DB,`SELECT * FROM ff_visible_reports WHERE channel_id=? AND video_id=? ${start&&end?'AND start_date=? AND end_date=?':''} ORDER BY updated_at DESC LIMIT 500`,cid,vid,...(start&&end?[start,end]:[]));
   const seen=new Set();return rows.filter(r=>canReport(p,r.kind)).filter(r=>{const key=[r.kind,r.start_date,r.end_date,r.source,r.source==='studio_csv'?r.id:''].join(':');if(seen.has(key))return false;seen.add(key);return true;}).map(r=>exposeReport(r,p));
 }
 async function reach(env:Env,cid:string,start:string,end:string,vid?:string){
   const channel=await one(env.DB,'SELECT ctr_unit,ctr_unit_source FROM ff_channels WHERE id=?',cid);
   const days=await one(env.DB,'SELECT count(*) n,min(day) first,max(day) last FROM ff_reach_days WHERE channel_id=? AND day BETWEEN ? AND ?',cid,start,end);
-  const rows=await all(env.DB,`SELECT r.day,sum(impressions) impressions,CASE WHEN sum(CASE WHEN impressions>0 AND ctr_raw IS NULL THEN 1 ELSE 0 END)>0 THEN NULL ELSE sum(impressions*ctr_raw)/NULLIF(sum(impressions),0) END ctr_raw FROM ff_reach r JOIN ff_reach_days d ON r.channel_id=d.channel_id AND r.day=d.day AND r.report_id=d.report_id WHERE r.channel_id=? AND r.day BETWEEN ? AND ? ${vid?'AND video_id=?':''} GROUP BY r.day ORDER BY r.day`,cid,start,end,...(vid?[vid]:[]));
+  const rows=await all(env.DB,`SELECT r.day,sum(impressions) impressions,CASE WHEN sum(CASE WHEN impressions>0 AND ctr_raw IS NULL THEN 1 ELSE 0 END)>0 THEN NULL ELSE sum(impressions*ctr_raw)/NULLIF(sum(impressions),0) END ctr_raw FROM ff_reach r JOIN ff_reach_days d ON r.channel_id=d.channel_id AND r.day=d.day AND r.report_id=d.report_id WHERE NOT EXISTS(SELECT 1 FROM ff_video_trash t WHERE t.channel_id=r.channel_id AND t.video_id=r.video_id) AND r.channel_id=? AND r.day BETWEEN ? AND ? ${vid?'AND video_id=?':''} GROUP BY r.day ORDER BY r.day`,cid,start,end,...(vid?[vid]:[]));
   const unit=channel?.ctr_unit||'unknown';const factor=unit==='ratio'?100:unit==='percent'?1:null;
   const expected=Math.round((Date.parse(end)-Date.parse(start))/86400000)+1;
   const impressions=rows.reduce((n,r)=>n+r.impressions,0);
@@ -75,13 +76,13 @@ async function handle(request:Request,env:Env):Promise<Response>{
     const sort=url.searchParams.get('sort')==='published'?'published_at DESC,id':'lifetime_views DESC,id';
     const where='channel_id=?'+(q?' AND (title LIKE ? ESCAPE \'\\\' OR tags LIKE ? ESCAPE \'\\\')':'');
     const escaped='%'+q.replace(/[\\%_]/g,'\\$&')+'%';const args=q?[cid,escaped,escaped]:[cid];
-    const count=await one(env.DB,'SELECT count(*) n FROM ff_videos WHERE '+where,...args);
-    const items=await all(env.DB,`SELECT channel_id,id,title,published_at,duration,lifetime_views,thumbnail_status,observed_at,tags,(SELECT max(updated_at) FROM ff_reports r WHERE r.channel_id=v.channel_id AND r.video_id=v.id AND kind='retention' AND status='success') retention_at FROM ff_videos v WHERE ${where} ORDER BY ${sort} LIMIT ? OFFSET ?`,...args,size,(page-1)*size);
+    const count=await one(env.DB,'SELECT count(*) n FROM ff_visible_videos WHERE '+where,...args);
+    const items=await all(env.DB,`SELECT channel_id,id,title,published_at,duration,lifetime_views,thumbnail_status,observed_at,tags,(SELECT max(updated_at) FROM ff_visible_reports r WHERE r.channel_id=v.channel_id AND r.video_id=v.id AND kind='retention' AND status='success') retention_at FROM ff_visible_videos v WHERE ${where} ORDER BY ${sort} LIMIT ? OFFSET ?`,...args,size,(page-1)*size);
     return json({items,total:count?.n||0,page,pages:Math.ceil((count?.n||0)/size)});
   }
   const videoMatch=path.match(/^\/api\/videos\/(UC[\w-]{22})\/([\w-]{11})$/);
   if(videoMatch){
-    const [,cid,vid]=videoMatch;allowed(p,cid);const v=await one(env.DB,'SELECT channel_id,id,title,published_at,duration,lifetime_views,thumbnail_status,observed_at,notes,tags FROM ff_videos WHERE channel_id=? AND id=?',cid,vid);if(!v)throw new AppError(404,'视频尚未同步，请先同步频道视频库。');
+    const [,cid,vid]=videoMatch;allowed(p,cid);const v=await one(env.DB,'SELECT channel_id,id,title,published_at,duration,lifetime_views,thumbnail_status,observed_at,notes,tags FROM ff_visible_videos WHERE channel_id=? AND id=?',cid,vid);if(!v)throw new AppError(404,'视频尚未同步，请先同步频道视频库。');
     if(method==='GET'){
       const start=url.searchParams.get('start')||undefined,end=url.searchParams.get('end')||undefined;if(start||end)dates(start,end);
       return json({video:v,reports:await reportRows(env,p,cid,vid,start,end),...(start&&end&&(isAdmin(p)||p.permissions.ctr)?{reach:await reach(env,cid,start,end,vid)}:{})});
@@ -90,21 +91,35 @@ async function handle(request:Request,env:Env):Promise<Response>{
   }
   const imageMatch=path.match(/^\/api\/thumbnails\/(UC[\w-]{22})\/([\w-]{11})$/);
   if(imageMatch&&method==='GET'){
-    allowed(p,imageMatch[1]);const v=await one(env.DB,'SELECT thumbnail_key FROM ff_videos WHERE channel_id=? AND id=?',imageMatch[1],imageMatch[2]);const object=v?.thumbnail_key?await env.FILES.get(v.thumbnail_key):null;if(!object)throw new AppError(404,'缩略图尚未保存。');return file(object.body,object.httpMetadata?.contentType||'image/jpeg');
+    allowed(p,imageMatch[1]);const v=await one(env.DB,'SELECT thumbnail_key FROM ff_visible_videos WHERE channel_id=? AND id=?',imageMatch[1],imageMatch[2]);const object=v?.thumbnail_key?await env.FILES.get(v.thumbnail_key):null;if(!object)throw new AppError(404,'缩略图尚未保存。');return file(object.body,object.httpMetadata?.contentType||'image/jpeg');
   }
   const createMatch=path.match(/^\/api\/channels\/(UC[\w-]{22})\/tasks$/);
   if(createMatch&&method==='POST'){
     const cid=createMatch[1];allowed(p,cid);capability(p,'sync');if(!await one(env.DB,'SELECT id FROM ff_channels WHERE id=?',cid))throw new AppError(404,'频道不存在。');
     const b=await readJson(request);if(!['catalog','reports','reach'].includes(b.kind))throw new AppError(400,'请选择视频库、报表或覆盖面任务。');
-    const period=b.kind==='catalog'?{start:null,end:null}:dates(b.start,b.end);const options:Row={};
+    if(b.period!==undefined&&!['custom','lifetime'].includes(b.period))throw new AppError(400,'日期类型无效。');
+    const period=b.kind==='catalog'?{start:null,end:null}:b.period==='lifetime'?await lifetimePeriod(env,cid,undefined,b.end):dates(b.start,b.end);const options:Row={period:b.period||'custom'};
     if(b.kind==='reach')capability(p,'ctr');
     if(b.kind==='reports'){
       if(!Array.isArray(b.reports)||!b.reports.length||b.reports.length>Object.keys(REPORTS).length)throw new AppError(400,'至少选择一项报表。');
       if(b.reports.some((k:any)=>typeof k!=='string'||!Object.hasOwn(REPORTS,k)||!canReport(p,k)))throw new AppError(403,'包含未获授权或未知的报表。');options.reports=[...new Set(b.reports)];
-      if(b.video_ids!==undefined){if(!Array.isArray(b.video_ids)||!b.video_ids.length||b.video_ids.length>100)throw new AppError(400,'单次手选最多 100 个视频；整个频道请使用全部视频选项。');options.video_ids=[...new Set(b.video_ids.map((x:any)=>videoId(String(x))))];for(const id of options.video_ids)if(!await one(env.DB,'SELECT id FROM ff_videos WHERE channel_id=? AND id=?',cid,id))throw new AppError(400,'所选视频不属于此频道或尚未同步。');}
-      const count=await one(env.DB,'SELECT count(*) n FROM ff_videos WHERE channel_id=?',cid);if(!count?.n)throw new AppError(400,'请先同步视频库，再采集报表。');
+      if(b.video_ids!==undefined){if(!Array.isArray(b.video_ids)||!b.video_ids.length||b.video_ids.length>100)throw new AppError(400,'单次手选最多 100 个视频；整个频道请使用全部视频选项。');options.video_ids=[...new Set(b.video_ids.map((x:any)=>videoId(String(x))))];for(const id of options.video_ids)if(!await one(env.DB,'SELECT id FROM ff_visible_videos WHERE channel_id=? AND id=?',cid,id))throw new AppError(400,'所选视频不属于此频道或尚未同步。');}
+      const count=await one(env.DB,'SELECT count(*) n FROM ff_visible_videos WHERE channel_id=?',cid);if(!count?.n)throw new AppError(400,'请先同步视频库，再采集报表。');
     }
     const id=await startTask(env,cid,b.kind,p.email,period.start,period.end,options);await audit(env,p.email,'start-task',id);return json({id},202);
+  }
+  if(path==='/api/trash'){
+    admin(p);
+    if(method==='GET')return json({items:await all(env.DB,'SELECT t.*,v.title,c.title channel_title FROM ff_video_trash t JOIN ff_videos v ON v.channel_id=t.channel_id AND v.id=t.video_id JOIN ff_channels c ON c.id=t.channel_id ORDER BY deleted_at DESC LIMIT 1000')});
+    if(method==='POST'){
+      const b=await readJson(request);const cid=channelId(String(b.channel_id||''));
+      if(!['delete','restore'].includes(b.action)||!Array.isArray(b.video_ids)||!b.video_ids.length||b.video_ids.length>100)throw new AppError(400,'请选择 1—100 条视频和有效操作。');
+      if(b.confirm!==true)throw new AppError(400,'请确认移入回收站或恢复操作。');
+      const ids=[...new Set<string>(b.video_ids.map((x:any)=>videoId(String(x))))];
+      for(const vid of ids)if(!await one(env.DB,'SELECT id FROM ff_videos WHERE channel_id=? AND id=?',cid,vid))throw new AppError(404,'视频不存在。');
+      await batches(env.DB,ids.map(vid=>b.action==='delete'?env.DB.prepare('INSERT OR IGNORE INTO ff_video_trash(channel_id,video_id,deleted_at,deleted_by) VALUES(?,?,?,?)').bind(cid,vid,now(),p.email):env.DB.prepare('DELETE FROM ff_video_trash WHERE channel_id=? AND video_id=?').bind(cid,vid)));
+      await audit(env,p.email,'trash-'+b.action,cid+':'+ids.join(','));return json({ok:true,count:ids.length});
+    }
   }
   if(path==='/api/tasks'&&method==='GET'){
     const items=(await taskView(env)).filter(t=>(isAdmin(p)||p.channels.includes(t.channel_id))&&(isAdmin(p)||p.permissions.ctr||t.kind!=='reach'));return json({items:items.map(safeTask)});
@@ -123,7 +138,7 @@ async function handle(request:Request,env:Env):Promise<Response>{
     const items=[];for(const cid of ids){allowed(p,channelId(cid));const c=await one(env.DB,'SELECT id,title FROM ff_channels WHERE id=?',cid);if(!c)throw new AppError(404,'频道不存在。');items.push({...c,reports:await reportRows(env,p,cid,'',start,end),...(isAdmin(p)||p.permissions.ctr?{reach:await reach(env,cid,start,end)}:{})});}return json({start,end,items});
   }
   if(path==='/api/import'&&method==='POST'){
-    admin(p);const b=await readJson(request,6_000_000);const cid=channelId(String(b.channel_id||'')),vid=videoId(String(b.video_id||''));dates(b.start,b.end);if(!await one(env.DB,'SELECT id FROM ff_videos WHERE channel_id=? AND id=?',cid,vid))throw new AppError(400,'请先同步并选择正确的视频。');
+    admin(p);const b=await readJson(request,6_000_000);const cid=channelId(String(b.channel_id||'')),vid=videoId(String(b.video_id||''));dates(b.start,b.end);if(!await one(env.DB,'SELECT id FROM ff_visible_videos WHERE channel_id=? AND id=?',cid,vid))throw new AppError(400,'请先同步并选择正确的视频。');
     if(typeof b.text!=='string'||new TextEncoder().encode(b.text).byteLength>3_000_000)throw new AppError(413,'请导入不超过 3 MB 的 CSV。');
     const name=textValue(b.filename,120)||'Studio 导入.csv';const result=studio(b.text,name);const id=crypto.randomUUID(),key=`imports/${cid}/${id}.csv`;
     if(new TextEncoder().encode(JSON.stringify(result.data)).byteLength>1_500_000)throw new AppError(413,'解析后的报表过大，请缩短或拆分 CSV。');
@@ -132,7 +147,7 @@ async function handle(request:Request,env:Env):Promise<Response>{
   }
   const reportMatch=path.match(/^\/api\/reports\/([\w-]+)\/(csv|raw)$/);
   if(reportMatch&&method==='GET'){
-    const r=await one(env.DB,'SELECT * FROM ff_reports WHERE id=?',reportMatch[1]);if(!r)throw new AppError(404,'报表不存在。');allowed(p,r.channel_id);capability(p,'export');if(!canReport(p,r.kind))throw new AppError(403,'没有此报表的导出权限。');
+    const r=await one(env.DB,'SELECT * FROM ff_visible_reports WHERE id=?',reportMatch[1]);if(!r)throw new AppError(404,'报表不存在。');allowed(p,r.channel_id);capability(p,'export');if(!canReport(p,r.kind))throw new AppError(403,'没有此报表的导出权限。');
     await audit(env,p.email,'export-report',r.id);
     if(reportMatch[2]==='raw'){admin(p);const obj=r.raw_key?await env.FILES.get(r.raw_key):null;if(!obj)throw new AppError(404,'没有原始文件。');return file(obj.body,obj.httpMetadata?.contentType||'application/octet-stream',r.id+(r.source==='studio_csv'?'.csv':'.json'));}
     const data=exposeReport(r,p).data;const rows=data.rows||data.dataset?.points||[];const columns=data.columns||Object.keys(rows[0]||{});return file(csvExport(rows,columns),'text/csv;charset=utf-8',r.id+'.csv');
@@ -142,9 +157,9 @@ async function handle(request:Request,env:Env):Promise<Response>{
     const cid=exportMatch[1];allowed(p,cid);capability(p,'export');await audit(env,p.email,'export-channel',cid);
     const stream=new ReadableStream({async start(controller){const encoder=new TextEncoder();const emit=(value:any)=>controller.enqueue(encoder.encode(JSON.stringify(value)+'\n'));try{
       emit({type:'manifest',format:'feifan-data-v1',channel_id:cid,exported_at:now(),note:'不含授权、视频文件或缩略图二进制；图像与原始附件在 R2。字段遵循导出者权限。'});
-      let last='';for(;;){const rows=await all(env.DB,'SELECT channel_id,id,title,published_at,duration,lifetime_views,observed_at,notes,tags,thumbnail_status FROM ff_videos WHERE channel_id=? AND id>? ORDER BY id LIMIT 100',cid,last);if(!rows.length)break;for(const row of rows)emit({type:'video',...row});last=rows.at(-1)!.id;}
-      last='';for(;;){const rows=await all(env.DB,'SELECT * FROM ff_reports WHERE channel_id=? AND id>? ORDER BY id LIMIT 40',cid,last);if(!rows.length)break;for(const r of rows)if(canReport(p,r.kind))emit({type:'report',channel_id:cid,video_id:r.video_id,...exposeReport(r,p)});last=rows.at(-1)!.id;}
-      if(isAdmin(p)||p.permissions.ctr){last='';for(;;){const rows=await all(env.DB,'SELECT r.* FROM ff_reach r JOIN ff_reach_days d ON r.channel_id=d.channel_id AND r.day=d.day AND r.report_id=d.report_id WHERE r.channel_id=? AND r.day||r.video_id>? ORDER BY r.day||r.video_id LIMIT 200',cid,last);if(!rows.length)break;for(const row of rows)emit({type:'reach_raw',...row,note:'ctr_raw 的单位见频道设置，不应直接当百分数'});last=rows.at(-1)!.day+rows.at(-1)!.video_id;}}
+      let last='';for(;;){const rows=await all(env.DB,'SELECT channel_id,id,title,published_at,duration,lifetime_views,observed_at,notes,tags,thumbnail_status FROM ff_visible_videos WHERE channel_id=? AND id>? ORDER BY id LIMIT 100',cid,last);if(!rows.length)break;for(const row of rows)emit({type:'video',...row});last=rows.at(-1)!.id;}
+      last='';for(;;){const rows=await all(env.DB,'SELECT * FROM ff_visible_reports WHERE channel_id=? AND id>? ORDER BY id LIMIT 40',cid,last);if(!rows.length)break;for(const r of rows)if(canReport(p,r.kind))emit({type:'report',channel_id:cid,video_id:r.video_id,...exposeReport(r,p)});last=rows.at(-1)!.id;}
+      if(isAdmin(p)||p.permissions.ctr){last='';for(;;){const rows=await all(env.DB,'SELECT r.* FROM ff_reach r JOIN ff_reach_days d ON r.channel_id=d.channel_id AND r.day=d.day AND r.report_id=d.report_id WHERE NOT EXISTS(SELECT 1 FROM ff_video_trash t WHERE t.channel_id=r.channel_id AND t.video_id=r.video_id) AND r.channel_id=? AND r.day||r.video_id>? ORDER BY r.day||r.video_id LIMIT 200',cid,last);if(!rows.length)break;for(const row of rows)emit({type:'reach_raw',...row,note:'ctr_raw 的单位见频道设置，不应直接当百分数'});last=rows.at(-1)!.day+rows.at(-1)!.video_id;}}
       emit({type:'end',complete:true});controller.close();
     }catch{emit({type:'error',complete:false,message:'导出中断，请重新导出；没有 end 标记的文件不完整。'});controller.close();}}});return file(stream,'application/x-ndjson;charset=utf-8',cid+'.jsonl');
   }

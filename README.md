@@ -5,6 +5,8 @@ Cloudflare 云端验证版 · 0.1.0 · 2026-09-29
 
 **从 [部署教程.md](部署教程.md) 开始。** 双击 [开始部署.html](开始部署.html) 可打开图文配置向导，生成配置文件和初次部署密钥。
 
+如果已经部署，但控制台提示“只有静态资产，不能添加变量 / 绑定”，先读教程开头的修复步骤。当前配置对齐已创建的 Worker **feifanneibupingtai**；部署命令必须使用 **npm run deploy**，构建命令使用 **npm run build**。
+
 ## 你已确认的配置
 - 尚无域名：先使用 Cloudflare 提供的 workers.dev 网址。
 - 管理员邮箱尚未确定：代码中留空，部署时在 Cloudflare 填写。
@@ -43,4 +45,3 @@ npm run check-upload
 - tests：本地隔离测试
 - cloudflare.config.json：填写新数据库的完整 UUID，其他名称可保持默认
 - package-lock.json：锁定依赖版本，应一起提交
-
