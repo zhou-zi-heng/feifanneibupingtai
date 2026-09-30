@@ -75,7 +75,7 @@ async function thumbnails(env:Env,task:Row,p:Row){
     const video=await one(env.DB,'SELECT thumbnail_url FROM ff_videos WHERE channel_id=? AND id=?',task.channel_id,id);if(!video?.thumbnail_url)continue;
     try{
       const u=new URL(video.thumbnail_url);if(u.protocol!=='https:'||!['i.ytimg.com','img.youtube.com'].includes(u.hostname)||u.username||u.password||u.port)throw new Error('invalid thumbnail');
-      const response=await fetch(u,{redirect:'error',signal:AbortSignal.timeout(15000)});if(!response.ok)throw new Error('download');
+      const response=await fetch(u,{redirect:'manual',signal:AbortSignal.timeout(15000)});if(!response.ok)throw new Error('download');
       const mime=response.headers.get('Content-Type')?.split(';')[0]||'';if(!['image/jpeg','image/png','image/webp'].includes(mime))throw new Error('invalid type');
       const key=`thumbnails/${task.channel_id}/${id}`;await env.FILES.put(key,await imageBytes(response),{httpMetadata:{contentType:mime},customMetadata:{source:'youtube_data',collectedAt:now()}});
       await run(env.DB,"UPDATE ff_videos SET thumbnail_key=?,thumbnail_status='saved' WHERE channel_id=? AND id=?",key,task.channel_id,id);
