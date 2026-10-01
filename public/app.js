@@ -45,7 +45,10 @@ function shell(){
 function setup(message,initialized=false){
   $('#app').innerHTML=`<main class="setup-wrap"><span class="brand-mark">凡</span><div class="eyebrow" style="margin-top:22px">FEIFAN · FIRST STEPS</div><h1>${initialized?'给你的工作室建好数据空间':'欢迎使用飞凡内部数据平台'}</h1><p>${initialized?'账号验证已通过。现在创建平台专用的数据表，然后连接 YouTube 频道。':'首次部署需要完成访问保护和管理员设置。配置完成前，业务数据不会开放。'}</p><div class="card"><h2>${initialized?'初始化独立数据库':'按这四步完成首次设置'}</h2>${message?`<div class="notice warn">${e(message)}</div>`:''}<div class="steps"><div class="step"><div><strong>部署完整后端，连接 D1、R2 和任务队列</strong><p>按教程设置构建和部署命令，使用专用 feifan-web-db。若控制台提示“只有静态资产”，先按教程开头修复部署。</p></div></div><div class="step"><div><strong>在 Cloudflare 开启 Access</strong><p>先把管理员邮箱加入允许名单，再设置团队域名与应用 AUD。</p></div></div><div class="step"><div><strong>设置 OWNER_EMAIL 和 TOKEN_KEY</strong><p>管理员邮箱可以在部署时填写。密钥生成与填写步骤见教程。</p></div></div><div class="step"><div><strong>刷新此页，初始化并连接频道</strong><p>初始化只创建本平台的 ff_ 数据表；已有本地授权不会自动上传。</p></div></div></div><div class="actions section-space">${initialized?'<button class="primary" data-act="initialize">初始化平台数据库</button>':'<button class="primary" data-act="reload">我已完成配置，重新检查</button>'}<a class="button" href="/guide.html" target="_blank" rel="noopener">打开一步一步教程 ↗</a></div></div></main>`;
 }
-async function boot(){try{S.me=await api('/api/me');if(!S.me.initialized){setup('',true);return;}shell();await render();await poll();}catch(error){setup(error.message);}}
+function unavailable(error){
+  $('#app').innerHTML=`<main class="setup-wrap"><span class="brand-mark">凡</span><h1>数据服务暂时不可用</h1><div class="card"><div class="notice warn">${e(error.message)}</div><p>登录与数据服务是分开的。这个提示不代表频道数据已删除，也不需要重新授权。</p><div class="actions"><button class="primary" data-act="reload">重新检查</button><a class="button" href="/guide.html" target="_blank" rel="noopener">查看使用指南</a></div></div></main>`;
+}
+async function boot(){try{S.me=await api('/api/me');S.pollBlocked=false;if(!S.me.initialized){setup('',true);return;}shell();await render();await poll();}catch(error){S.pollBlocked=true;if(error.code?.startsWith('database_'))unavailable(error);else setup(error.message);}}
 function setContent(html,version){if(version!==S.version)return false;$('#content').innerHTML=html;return true;}
 function taskItem(t){const total=Number(t.total)||0,done=Number(t.done)||0;const active=['running','queued'].includes(t.status);return `<div class="task-item"><div class="row"><h3><a href="#/tasks/${e(t.id)}">${e(t.channel_title)} · ${{catalog:'视频库与封面',reports:'分析报表',reach:'覆盖面与 CTR'}[t.kind]||e(t.kind)}</a></h3>${badge(t.status)}</div><p>${e(t.start_date?`${t.start_date} 至 ${t.end_date}`:'完整目录同步')} · ${e(time(t.updated_at))}</p><div class="progress ${active&&!done?'indeterminate':''}"><span style="width:${total?Math.min(100,done/total*100):0}%"></span></div><div class="row"><small>${done} / ${total} 个后台步骤${t.failed?` · ${t.failed} 项待处理`:''}</small><a href="#/tasks/${e(t.id)}" class="muted">查看详情 →</a></div>${t.note?`<p>${e(t.note)}</p>`:''}${t.error?`<p style="color:var(--red)">${e(t.error)}</p>`:''}</div>`;}
 function cardChannel(c){return `<article class="card channel-card">${badge(c.auth_state)}<div class="channel-mark">${e(c.title.slice(0,1))}</div><h3><a href="#/library/${c.id}">${e(c.title)}</a></h3><div class="channel-id">${e(c.id)}</div><div class="channel-stats"><div><strong>${fmt(c.video_count)}</strong><small>已保存视频</small></div><div><strong>${fmt(c.retention_count)}</strong><small>有留存曲线</small></div></div><div class="actions"><a class="button small" href="#/library/${c.id}">进入频道 ${icon('arrow')}</a>${can('sync')?`<button class="text-button" data-act="catalog" data-cid="${c.id}">同步视频库</button>`:''}</div><div class="status-note section-space">封面 ${fmt(c.thumbnail_count)} 张 · ${c.synced_at?e(time(c.synced_at)):'尚未同步视频目录'}</div></article>`;}
@@ -118,11 +121,27 @@ async function trashPage(v){const {items}=await api('/api/trash');setContent(hea
 function trashDialog(cid,ids,action){if(!ids.length)throw new Error('请先勾选视频。');if(ids.length>100)throw new Error('单次最多操作 100 条视频，请减少选择。');modal(`<div class="modal-head"><h2>${action==='delete'?'移入回收站':'恢复视频'}：${ids.length} 条</h2><button class="ghost" data-act="close">×</button></div><p>${e(channelName(cid))}</p><p>${action==='delete'?'所选视频及其已有报表、封面将隐藏，可在回收站恢复。排队中的采集将跳过这些视频；已执行的一步可能完成保存。':'视频及原有报表会重新显示。被跳过的采集需重新安排。'}</p><p>只操作本平台保存的数据，不会删除 YouTube 视频。</p><div class="modal-footer"><button data-act="close">取消</button><button class="${action==='delete'?'danger':'primary'}" data-act="confirm-trash" data-cid="${cid}" data-ids="${ids.join(',')}" data-action="${action}">确认${action==='delete'?'移入回收站':'恢复'}</button></div>`);}
 function userDialog(email){const u=S.users.find(x=>x.email===email)||{email:'',role:'editor',channels:[],permissions:{},disabled:false};modal(`<div class="modal-head"><h2>${email?'编辑成员权限':'添加工作室成员'}</h2><button class="ghost" data-act="close">×</button></div><form id="user-form"><div class="form-grid"><label>登录邮箱<input name="email" type="email" value="${e(u.email)}" required ${email?'readonly':''}></label><label>角色<select name="role"><option value="editor" ${u.role==='editor'?'selected':''}>数据整理成员</option><option value="admin" ${u.role==='admin'?'selected':''}>管理员（全部权限）</option></select></label><div class="full"><label style="margin-bottom:8px">允许访问的频道（管理员自动拥有全部）</label><div class="checkbox-grid">${S.me.channels.map(c=>`<label class="inline"><input type="checkbox" name="channel" value="${c.id}" ${u.channels.includes(c.id)?'checked':''}>${e(c.title)}</label>`).join('')}</div></div><div class="full"><label style="margin-bottom:8px">额外权限（普通成员默认关闭）</label><div class="checkbox-grid">${[['ctr','CTR、展示与覆盖面'],['revenue','收入与广告数据'],['sync','启动 / 管理采集任务'],['export','导出已获准的数据']].map(([k,t])=>`<label class="inline"><input name="permission" type="checkbox" value="${k}" ${u.permissions[k]?'checked':''}>${t}</label>`).join('')}</div></div><label class="inline full"><input name="disabled" type="checkbox" ${u.disabled?'checked':''}>停用此账号</label></div><div class="modal-footer"><button type="button" data-act="close">取消</button><button class="primary" type="submit">保存权限</button></div></form>`);}
 function applyPeriod(){const start=$('#period-start').value,end=$('#period-end').value;if(!start||!end||start>end){toast('请填写正确的开始和结束日期。',true);return;}S.start=start;S.end=end;S.report=null;render();}
-async function poll(){
-  if(S.polling||!S.me?.initialized)return;S.polling=true;
+async function poll(force=true){
+  if(S.polling||!S.me?.initialized||S.pollBlocked)return;
+  const interval=S.tasks.some(t=>['queued','running'].includes(t.status))?15000:120000;
+  if(!force&&Date.now()-(S.lastPoll||0)<interval)return;
+  S.polling=true;S.lastPoll=Date.now();
+  try{
+    const summary=(await api('/api/tasks?summary=1')).items;
+    const revision=JSON.stringify(summary.map(t=>[t.id,t.status,t.updated_at]));
+    if(!force&&revision===S.taskRevision)return;
+    S.taskRevision=revision;
+    await refreshProgress();
+  }catch(error){
+    connection(false);
+    if(error.code==='database_quota'){S.pollBlocked=true;const banner=$('#connection-banner');if(banner){banner.hidden=false;banner.textContent=error.message+' 自动刷新已暂停，恢复额度后请刷新页面。';}toast(error.message,true);}
+  }finally{S.polling=false;}
+}
+async function refreshProgress(){
+  const oldTasks=S.tasks;
   try{const previous=JSON.stringify(S.tasks.map(t=>[t.id,t.status,t.done,t.total]));S.tasks=(await api('/api/tasks')).items;const active=S.tasks.filter(t=>['queued','running'].includes(t.status));const pending=S.tasks.filter(t=>t.status==='partial');if($('#dock'))$('#dock').innerHTML=active.length?`<div class="task-dock"><span class="spinner"></span><div><strong>${active.length} 个任务正在云端处理</strong><br><small>${e(active[0].channel_title)} · ${e(active[0].note||'正在保存每一步进度')}</small></div><a href="#/tasks">查看进度 →</a></div>`:pending.length?`<div class="task-dock"><div><strong>${pending.length} 个任务有待处理项目</strong><br><small>查看缺失、失败或等待生成的报表。</small></div><a href="#/tasks">前往处理 →</a></div>`:'';
-    if(previous!==JSON.stringify(S.tasks.map(t=>[t.id,t.status,t.done,t.total]))){const fresh=await api('/api/me');S.me=fresh;if(['tasks','overview','channels'].includes(route().parts[0])&&!$('#modal').open)await render();}
-  }catch(error){connection(false);}finally{S.polling=false;}
+    if(previous!==JSON.stringify(S.tasks.map(t=>[t.id,t.status,t.done,t.total]))){const finished=S.tasks.some(t=>['success','partial','cancelled'].includes(t.status)&&oldTasks.some(old=>old.id===t.id&&['queued','running'].includes(old.status)));if(finished||Date.now()-(S.lastChannelRefresh||0)>120000){S.me=await api('/api/me');S.lastChannelRefresh=Date.now();}if(['tasks','overview','channels'].includes(route().parts[0])&&!$('#modal').open)await render();}
+  }catch(error){throw error;}
 }
 document.addEventListener('click',async event=>{
   const button=event.target.closest('[data-act]');if(!button||button.disabled)return;const a=button.dataset.act;
@@ -187,4 +206,4 @@ document.addEventListener('submit',async event=>{
 });
 document.addEventListener('error',event=>{if(event.target.tagName==='IMG'){event.target.remove();}},true);
 document.addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.matches('.peak'))event.target.click();});
-window.addEventListener('hashchange',render);document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll();});setInterval(()=>{if(!document.hidden)poll();},8000);boot();
+window.addEventListener('hashchange',render);document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll(false);});setInterval(()=>{if(!document.hidden)poll(false);},15000);boot();

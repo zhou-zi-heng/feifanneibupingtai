@@ -1,4 +1,5 @@
 import {ensureLibrary,lifetimePeriod} from './library';
+import {initialized,databaseFailure} from './database';
 import schema from './schema.sql';
 import {Env,Person,Row,AppError,all,one,run,batches,parse,now,allowed,admin,capability,isAdmin,dates,textValue,videoId,channelId} from './types';
 import {person,mutation,readJson,audit,local,configMissing} from './security';
@@ -13,7 +14,6 @@ const securityHeaders={
 };
 function json(data:any,status=200){return new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json;charset=utf-8',...securityHeaders}});}
 function file(data:BodyInit|null,type:string,name?:string){return new Response(data,{headers:{'Content-Type':type,...securityHeaders,...(name?{'Content-Disposition':`attachment; filename="${name}"`}:{})}});}
-async function initialized(env:Env){try{const ready=(await one(env.DB,"SELECT value FROM ff_meta WHERE key='schema_version'"))?.value==='1';if(ready)await ensureLibrary(env);return ready;}catch{return false;}}
 async function channels(env:Env,p:Person){
   const items=await all(env.DB,`SELECT id,title,auth_state,connected_at,synced_at,scopes_json,ctr_unit,ctr_unit_source,last_error,(SELECT count(*) FROM ff_visible_videos v WHERE v.channel_id=c.id) video_count,(SELECT count(*) FROM ff_visible_videos v WHERE v.channel_id=c.id AND thumbnail_status='saved') thumbnail_count,(SELECT count(DISTINCT video_id) FROM ff_visible_reports r WHERE r.channel_id=c.id AND r.kind='retention' AND r.status='success') retention_count FROM ff_channels c ORDER BY title`);
   return items.filter(c=>isAdmin(p)||p.channels.includes(c.id)).map(c=>({id:c.id,title:c.title,auth_state:c.auth_state,connected_at:c.connected_at,synced_at:c.synced_at,video_count:c.video_count,thumbnail_count:c.thumbnail_count,retention_count:c.retention_count,...(isAdmin(p)?{monetary:parse<string[]>(c.scopes_json,[]).includes(MONEY),ctr_unit:c.ctr_unit,ctr_unit_source:c.ctr_unit_source,last_error:c.last_error}:{})}));
@@ -122,7 +122,7 @@ async function handle(request:Request,env:Env):Promise<Response>{
     }
   }
   if(path==='/api/tasks'&&method==='GET'){
-    const items=(await taskView(env)).filter(t=>(isAdmin(p)||p.channels.includes(t.channel_id))&&(isAdmin(p)||p.permissions.ctr||t.kind!=='reach'));return json({items:items.map(safeTask)});
+    const items=(url.searchParams.get('summary')==='1'?await all(env.DB,'SELECT id,channel_id,kind,status,updated_at FROM ff_tasks ORDER BY created_at DESC LIMIT 100'):await taskView(env)).filter(t=>(isAdmin(p)||p.channels.includes(t.channel_id))&&(isAdmin(p)||p.permissions.ctr||t.kind!=='reach'));return json({items:items.map(safeTask)});
   }
   const taskMatch=path.match(/^\/api\/tasks\/([\w-]+)(?:\/(retry|cancel))?$/);
   if(taskMatch){
@@ -176,6 +176,6 @@ async function handle(request:Request,env:Env):Promise<Response>{
   throw new AppError(404,'此功能地址不存在。');
 }
 export default {
-  async fetch(request:Request,env:Env){try{return await handle(request,env);}catch(error){if(error instanceof AppError)return json({error:error.message,code:error.code},error.status);console.error('feifan request failed',error instanceof Error?error.name:'unknown');return json({error:'服务暂时无法完成请求。请查看连接与设置、数据库绑定或 Cloudflare 运行日志。',code:'internal_error'},500);}},
+  async fetch(request:Request,env:Env){try{return await handle(request,env);}catch(error){if(error instanceof AppError)return json({error:error.message,code:error.code},error.status);const db=databaseFailure(error);if(db.code==='database_quota')return json({error:db.message,code:db.code},db.status);console.error('feifan request failed',error instanceof Error?error.name:'unknown');return json({error:'服务暂时无法完成请求。请查看连接与设置、数据库绑定或 Cloudflare 运行日志。',code:'internal_error'},500);}},
   async queue(batch:MessageBatch<{id:string}>,env:Env){await consume(env,batch);}
 };

@@ -21,9 +21,11 @@ export async function startTask(env:Env,cid:string,kind:string,who:string,start:
   return id;
 }
 export async function refreshTask(env:Env,id:string){
-  const counts=await all(env.DB,'SELECT status,count(*) n FROM ff_work WHERE task_id=? GROUP BY status',id);
-  const count=Object.fromEntries(counts.map(r=>[r.status,r.n]));
-  const status=(count.pending||count.queued||count.running)?'running':(count.error||count.permission||count.waiting)?'partial':'success';
+  // Only existence matters here; counting every finished item after every step
+  // made large collections consume a quadratic number of D1 row reads.
+  const active=await one(env.DB,"SELECT 1 found FROM ff_work WHERE task_id=? AND status IN ('pending','queued','running') LIMIT 1",id);
+  const failed=active?null:await one(env.DB,"SELECT 1 found FROM ff_work WHERE task_id=? AND status IN ('error','permission','waiting') LIMIT 1",id);
+  const status=active?'running':failed?'partial':'success';
   await run(env.DB,"UPDATE ff_tasks SET status=?,updated_at=? WHERE id=? AND status!='cancelled'",status,now(),id);
 }
 export async function taskView(env:Env,cid?:string){

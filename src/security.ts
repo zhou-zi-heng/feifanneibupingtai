@@ -1,5 +1,6 @@
 import {createRemoteJWKSet,jwtVerify} from 'jose';
 import {Env,Person,AppError,one,parse,now,run} from './types';
+import {databaseFailure,missingTable} from './database';
 const keySets=new Map<string,ReturnType<typeof createRemoteJWKSet>>();
 export const local=(request:Request,env:Env)=>env.LOCAL_DEV==='true'&&['localhost','127.0.0.1'].includes(new URL(request.url).hostname);
 export function configMissing(env:Env){return ['DB','FILES','SYNC_QUEUE','OWNER_EMAIL','TOKEN_KEY','ACCESS_TEAM_DOMAIN','ACCESS_AUD'].filter(k=>!env[k as keyof Env]);}
@@ -21,7 +22,7 @@ export async function identity(request:Request,env:Env):Promise<{email:string,su
 export async function person(request:Request,env:Env):Promise<Person>{
   const who=await identity(request,env);
   if(who.email===env.OWNER_EMAIL?.trim().toLowerCase())return {...who,role:'admin',owner:true,channels:[],permissions:{ctr:true,revenue:true,sync:true,export:true}};
-  let user;try{user=await one(env.DB,'SELECT * FROM ff_users WHERE email=?',who.email);}catch{}
+  let user;try{user=await one(env.DB,'SELECT * FROM ff_users WHERE email=?',who.email);}catch(error){if(!missingTable(error,'ff_users'))throw databaseFailure(error);}
   if(!user||user.disabled)throw new AppError(403,'此邮箱尚未被管理员邀请，或账号已停用。','not_invited');
   const permission=parse(user.permissions_json);
   return {...who,role:user.role==='admin'?'admin':'editor',owner:false,channels:parse(user.channels_json,[]),permissions:{ctr:permission.ctr===true,revenue:permission.revenue===true,sync:permission.sync===true,export:permission.export===true}};

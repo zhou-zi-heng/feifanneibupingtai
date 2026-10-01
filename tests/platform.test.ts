@@ -5,7 +5,7 @@ import {resolve} from 'node:path';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 import {seal,unseal} from '../src/security';
 import {studio,reachCsv,verifiedRatio,normalize,canReport,csvExport} from '../src/reports';
-import {consume,startTask} from '../src/jobs';
+import {consume,startTask,refreshTask} from '../src/jobs';
 import {begin,finish,BASE_SCOPES} from '../src/google';
 import {digest} from '../src/types';
 import {pacificDay,lifetimePeriod} from '../src/library';
@@ -210,4 +210,25 @@ test('catalog pagination, thumbnails and analytics survive duplicate work and pe
     assert.equal((await data(`/api/videos/${cid}/${first}`)).reports.length,1);
     const invalid=await request(`/api/channels/${cid}/tasks`,{kind:'reports',reports:['toString'],start:'2026-09-01',end:'2026-09-26'});assert.equal(invalid.status,403);
   }finally{globalThis.fetch=original;}
+});
+
+test('lightweight task polling preserves staff filtering and omits payloads and expensive counts',async()=>{
+  const result=await data('/api/tasks?summary=1',undefined,STAFF);
+  for(const task of result.items){assert.equal(task.channel_id,CID);assert.notEqual(task.kind,'reach');assert.equal('options_json' in task,false);assert.equal('total' in task,false);}
+  assert.ok((await data('/api/tasks?summary=1')).items.length>0);
+});
+
+test('large completed tasks use indexed existence probes while preserving task states',async()=>{
+  const id='read-budget-test';
+  await db.prepare("INSERT INTO ff_tasks(id,channel_id,kind,status,created_by,created_at,updated_at) VALUES(?,?,'reports','running',?,'2026-10-01','2026-10-01')").bind(id,CID,OWNER).run();
+  for(let offset=0;offset<240;offset+=60)await db.batch(Array.from({length:60},(_,n)=>db.prepare("INSERT INTO ff_work(id,task_id,kind,payload_json,status,updated_at) VALUES(?,?,'analytics','{}','success','2026-10-01')").bind('budget-'+(offset+n),id)));
+  const sql="SELECT 1 found FROM ff_work WHERE task_id=? AND status IN ('pending','queued','running') LIMIT 1";
+  const probe=await db.prepare(sql).bind(id).all();assert.ok(probe.meta.rows_read<20,JSON.stringify(probe.meta));
+  await refreshTask({DB:db} as any,id);assert.equal((await db.prepare('SELECT status FROM ff_tasks WHERE id=?').bind(id).first()).status,'success');
+  await db.prepare("UPDATE ff_work SET status='error' WHERE id='budget-0'").run();
+  await refreshTask({DB:db} as any,id);assert.equal((await db.prepare('SELECT status FROM ff_tasks WHERE id=?').bind(id).first()).status,'partial');
+  await db.prepare("UPDATE ff_work SET status='queued' WHERE id='budget-1'").run();
+  await refreshTask({DB:db} as any,id);assert.equal((await db.prepare('SELECT status FROM ff_tasks WHERE id=?').bind(id).first()).status,'running');
+  await db.prepare("UPDATE ff_tasks SET status='cancelled' WHERE id=?").bind(id).run();
+  await refreshTask({DB:db} as any,id);assert.equal((await db.prepare('SELECT status FROM ff_tasks WHERE id=?').bind(id).first()).status,'cancelled');
 });
