@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+.bundle/
+.dev.vars*
+.env*
+!.dev.vars.example
+wrangler.generated.jsonc
+coverage/
+*.log
+verification/
+cloudflare.local.json
